@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+import asyncio
+from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -7,11 +8,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.routes import ApiError, router
+from app.tick import run_tick
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    yield
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    async def tick_loop() -> None:
+        while True:
+            run_tick()
+            await asyncio.sleep(1)
+
+    tick_task = asyncio.create_task(tick_loop())
+    try:
+        yield
+    finally:
+        tick_task.cancel()
+        try:
+            await tick_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="FreshRelay API", lifespan=lifespan)

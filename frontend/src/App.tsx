@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { BatchesPanel } from './components/BatchesPanel'
+import { EventLog } from './components/EventLog'
 import { MapView } from './components/MapView'
+import { ShipmentsTable } from './components/ShipmentsTable'
 import { Toast } from './components/Toast'
 import { TopBar } from './components/TopBar'
 import { useAppState } from './hooks/useAppState'
@@ -19,8 +21,8 @@ export default function App(): JSX.Element {
       {state ? <div className="console-layout">
         <BatchesPanel state={state} now={now} refresh={refresh} />
         <MapView state={state} now={now} />
-        <aside className="side-panel events-panel"><div className="panel-title"><div><p className="eyebrow">AUDIT STREAM</p><h2>Event log</h2></div><strong>{state.events.length}</strong></div><div className="placeholder-list"><p>Decision events will appear here.</p><span>{state.events.length} recorded events</span></div></aside>
-        <section className="shipments-drawer"><div className="panel-title"><div><p className="eyebrow">DISPATCH QUEUE</p><h2>Shipments</h2></div><strong>{state.shipments.length}</strong></div><div className="drawer-placeholder">Shipment controls will appear here.</div></section>
+        <EventLog events={state.events} />
+        <ShipmentsTable state={state} now={now} />
       </div> : <div className="loading-state">{loading ? 'Connecting to dispatch state…' : 'No state available'}</div>}
       <Toast />
     </main>

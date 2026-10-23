@@ -2,13 +2,13 @@ from datetime import timedelta
 from math import ceil
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 
 from app import clock, store
 from app.events import log_event
 from app.geo import travel_minutes
 from app.leases import extend_shipment_lease, lease_expiry
-from app.matcher import SAFETY_BUFFER, is_feasible, split_batch
+from app.matcher import SAFETY_BUFFER, split_batch
 from app.models import (
     Batch,
     BatchStatus,
@@ -19,8 +19,7 @@ from app.models import (
     Location,
     Resource,
 )
-from app.rules import REQUIRED_RESOURCES
-from app.rules import is_compatible
+from app.rules import REQUIRED_RESOURCES, is_compatible
 from app.reroute import reroute_shelter_shipments
 from app.tick import run_tick
 
@@ -108,8 +107,21 @@ def get_rules() -> dict[str, list[str]]:
 
 @router.get("/events")
 def get_events(since: str | None = None) -> dict:
-    # STUB: replaced in phase Bx
-    return {"events": []}
+    with store.lock:
+        if since is None:
+            matching_events = store.events[-100:]
+        else:
+            try:
+                since_number = int(since.removeprefix("evt_"))
+            except ValueError:
+                matching_events = []
+            else:
+                matching_events = [
+                    event
+                    for event in store.events
+                    if int(event.id.removeprefix("evt_")) > since_number
+                ]
+        return {"events": [_json(event) for event in matching_events]}
 
 
 def _create_batch(
@@ -201,6 +213,31 @@ def claim_shipment(shipment_id: str, request: ClaimShipmentRequest) -> dict:
                 "NOT_CLAIMABLE",
                 "The shipment is not available for this rider to claim.",
             )
+        rider = store.riders.get(shipment.rider_id)
+        if rider is None:
+            raise ApiError(
+                409, "NOT_CLAIMABLE", "The shipment's rider is unavailable."
+            )
+        active_statuses = {
+            "CREATED",
+            "CLAIMED",
+            "PICKED_UP",
+            "IN_TRANSIT",
+            "REROUTED",
+        }
+        active_qty = sum(
+            store.shipments[active_id].qty
+            for active_id in rider.active_shipment_ids
+            if active_id != shipment.id
+            and active_id in store.shipments
+            and store.shipments[active_id].status in active_statuses
+        )
+        if active_qty + shipment.qty > rider.capacity:
+            raise ApiError(
+                409,
+                "RIDER_AT_CAPACITY",
+                "The rider does not have enough remaining capacity.",
+            )
         batch = store.batches.get(shipment.batch_id)
         if batch is None:
             raise ApiError(409, "NOT_CLAIMABLE", "The shipment batch is unavailable.")
@@ -266,6 +303,22 @@ def rider_heartbeat(rider_id: str, location: Location) -> dict:
             extend_shipment_lease(shipment, batch, now)
             extended_shipment_ids.append(shipment.id)
 
+        log_event(
+            EventType.SHIPMENT_CLAIMED,
+            EventSeverity.INFO,
+            (
+                f"Rider {rider_id} heartbeat received; "
+                f"extended leases for {len(extended_shipment_ids)} active shipments."
+            ),
+            {
+                "riderId": rider_id,
+                **(
+                    {"shipmentId": extended_shipment_ids[0]}
+                    if extended_shipment_ids
+                    else {}
+                ),
+            },
+        )
         return {
             "rider": {
                 "id": rider.id,
@@ -393,7 +446,9 @@ def deliver_shipment(shipment_id: str, request: EmptyRequest) -> dict:
 
 
 @router.post("/shelters/{shelter_id}")
-def update_shelter(shelter_id: str, request: dict[str, Any]) -> dict:
+def update_shelter(shelter_id: str, request: Any = Body(...)) -> dict:
+    if not isinstance(request, dict):
+        raise ApiError(400, "INVALID_FIELD", "The request body must be an object.")
     allowed_fields = {"demandRemaining", "isOpen", "resources"}
     unknown_fields = set(request) - allowed_fields
     if unknown_fields:

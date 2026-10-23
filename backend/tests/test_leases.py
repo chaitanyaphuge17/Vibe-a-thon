@@ -70,6 +70,60 @@ def test_claim_sets_lease_and_returns_ttl(client: TestClient):
     assert second_claim.json()["error"]["code"] == "NOT_CLAIMABLE"
 
 
+def test_claim_rejects_load_above_rider_capacity(client: TestClient):
+    _, shipment_id = create_shipment_batch()
+    shipment = store.shipments[shipment_id]
+    rider = store.riders[shipment.rider_id]
+    rider.capacity = shipment.qty - 1
+
+    response = client.post(
+        f"/api/shipments/{shipment_id}/claim",
+        json={"riderId": rider.id},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "RIDER_AT_CAPACITY"
+
+
+def test_state_has_all_collections_and_events_filter_after_id(client: TestClient):
+    created = client.post(
+        "/api/batches",
+        json={
+            "donorId": "donor_1",
+            "itemType": "cooked_meal",
+            "totalQty": 10,
+            "expiresInMinutes": 60,
+        },
+    )
+    assert created.status_code == 201
+    batch_id = created.json()["batch"]["id"]
+    dispatched = client.post(f"/api/batches/{batch_id}/dispatch", json={})
+    assert dispatched.status_code == 200
+    state = client.get("/api/state").json()
+    assert {
+        "clock",
+        "donors",
+        "riders",
+        "shelters",
+        "batches",
+        "shipments",
+        "events",
+    } <= state.keys()
+
+    events = client.get("/api/events", params={"since": "evt_1"}).json()["events"]
+    assert events
+    assert all(int(event["id"].removeprefix("evt_")) > 1 for event in events)
+
+
+def test_shelter_update_rejects_non_object_body_with_contract_error(
+    client: TestClient,
+):
+    response = client.post("/api/shelters/shelter_a", json=[])
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_FIELD"
+
+
 def test_expired_lease_marks_rider_unresponsive_and_reassigns(client: TestClient):
     batch, shipment_id = create_shipment_batch()
     shipment = store.shipments[shipment_id]

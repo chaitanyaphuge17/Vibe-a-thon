@@ -34,7 +34,11 @@ def run_tick() -> dict[str, int]:
         for shipment in list(store.shipments.values()):
             if (
                 shipment.status
-                not in (ShipmentStatus.CLAIMED, ShipmentStatus.IN_TRANSIT)
+                not in (
+                    ShipmentStatus.CLAIMED,
+                    ShipmentStatus.IN_TRANSIT,
+                    ShipmentStatus.REROUTED,
+                )
                 or shipment.lease_expires_at is None
                 or shipment.lease_expires_at >= now
             ):
@@ -108,6 +112,7 @@ def run_tick() -> dict[str, int]:
                         ShipmentStatus.CLAIMED,
                         ShipmentStatus.PICKED_UP,
                         ShipmentStatus.IN_TRANSIT,
+                        ShipmentStatus.REROUTED,
                     ):
                         _release_reservation(
                             shipment.qty, shipment.shelter_id

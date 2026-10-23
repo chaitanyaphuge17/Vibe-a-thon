@@ -1,11 +1,14 @@
 from datetime import timedelta
+from math import ceil
+from typing import Any
 
 from fastapi import APIRouter
 
 from app import clock, store
 from app.events import log_event
+from app.geo import travel_minutes
 from app.leases import extend_shipment_lease, lease_expiry
-from app.matcher import split_batch
+from app.matcher import SAFETY_BUFFER, is_feasible, split_batch
 from app.models import (
     Batch,
     BatchStatus,
@@ -17,6 +20,8 @@ from app.models import (
     Resource,
 )
 from app.rules import REQUIRED_RESOURCES
+from app.rules import is_compatible
+from app.reroute import reroute_shelter_shipments
 from app.tick import run_tick
 
 
@@ -107,6 +112,33 @@ def get_events(since: str | None = None) -> dict:
     return {"events": []}
 
 
+def _create_batch(
+    donor_id: str, item_type: ItemType, total_qty: int, expires_in_minutes: int
+) -> Batch:
+    batch_id = f"batch_{store.next_batch_id}"
+    store.next_batch_id += 1
+    created_at = clock.now()
+    batch = Batch(
+        id=batch_id,
+        donor_id=donor_id,
+        item_type=item_type,
+        total_qty=total_qty,
+        remaining_qty=total_qty,
+        created_at=created_at,
+        expires_at=created_at + timedelta(minutes=expires_in_minutes),
+        status=BatchStatus.OPEN,
+        status_reason=None,
+    )
+    store.batches[batch_id] = batch
+    log_event(
+        EventType.BATCH_CREATED,
+        EventSeverity.SUCCESS,
+        f"Batch {batch_id} created.",
+        {"batchId": batch_id, "donorId": donor_id},
+    )
+    return batch
+
+
 @router.post("/batches", status_code=201)
 def create_batch(request: CreateBatchRequest) -> dict:
     try:
@@ -121,26 +153,11 @@ def create_batch(request: CreateBatchRequest) -> dict:
         if request.donor_id not in store.donors:
             raise ApiError(404, "DONOR_NOT_FOUND", "The donor does not exist.")
 
-        batch_id = f"batch_{store.next_batch_id}"
-        store.next_batch_id += 1
-        created_at = clock.now()
-        batch = Batch(
-            id=batch_id,
-            donor_id=request.donor_id,
-            item_type=item_type,
-            total_qty=request.total_qty,
-            remaining_qty=request.total_qty,
-            created_at=created_at,
-            expires_at=created_at + timedelta(minutes=request.expires_in_minutes),
-            status=BatchStatus.OPEN,
-            status_reason=None,
-        )
-        store.batches[batch_id] = batch
-        log_event(
-            EventType.BATCH_CREATED,
-            EventSeverity.SUCCESS,
-            f"Batch {batch_id} created.",
-            {"batchId": batch_id, "donorId": request.donor_id},
+        batch = _create_batch(
+            request.donor_id,
+            item_type,
+            request.total_qty,
+            request.expires_in_minutes,
         )
         return {"batch": _json(batch)}
 
@@ -240,6 +257,7 @@ def rider_heartbeat(rider_id: str, location: Location) -> dict:
             if shipment is None or shipment.status not in (
                 "CLAIMED",
                 "IN_TRANSIT",
+                "REROUTED",
             ):
                 continue
             batch = store.batches.get(shipment.batch_id)
@@ -266,7 +284,7 @@ def pickup_shipment(shipment_id: str, request: EmptyRequest) -> dict:
             raise ApiError(
                 404, "SHIPMENT_NOT_FOUND", "The shipment does not exist."
             )
-        if shipment.status != "CLAIMED":
+        if shipment.status not in ("CLAIMED", "REROUTED"):
             raise ApiError(
                 409,
                 "INVALID_TRANSITION",
@@ -304,7 +322,7 @@ def deliver_shipment(shipment_id: str, request: EmptyRequest) -> dict:
             raise ApiError(
                 409, "SHIPMENT_SPOILED", "The shipment has spoiled."
             )
-        if shipment.status != "IN_TRANSIT":
+        if shipment.status not in ("IN_TRANSIT", "REROUTED"):
             raise ApiError(
                 409,
                 "INVALID_TRANSITION",
@@ -375,29 +393,74 @@ def deliver_shipment(shipment_id: str, request: EmptyRequest) -> dict:
 
 
 @router.post("/shelters/{shelter_id}")
-def update_shelter(shelter_id: str, request: ShelterUpdateRequest) -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "shelter": {
-            "id": shelter_id,
-            "demandRemaining": 0,
-            "isOpen": True,
-            "resources": ["clean_water", "cooking_fuel"],
-        },
-        "rerouted": [
-            {
-                "shipmentId": "ship_1",
-                "fromShelterId": shelter_id,
-                "toShelterId": "shelter_c",
-            }
-        ],
-        "atRisk": [
-            {
-                "shipmentId": "ship_2",
-                "reason": "No open compatible shelter reachable before expiry.",
-            }
-        ],
-    }
+def update_shelter(shelter_id: str, request: dict[str, Any]) -> dict:
+    allowed_fields = {"demandRemaining", "isOpen", "resources"}
+    unknown_fields = set(request) - allowed_fields
+    if unknown_fields:
+        field = sorted(unknown_fields)[0]
+        raise ApiError(400, "INVALID_FIELD", f"Unsupported shelter field: {field}.")
+
+    parsed_resources: list[Resource] | None = None
+    if "demandRemaining" in request:
+        demand = request["demandRemaining"]
+        if isinstance(demand, bool) or not isinstance(demand, int) or demand < 0:
+            raise ApiError(
+                400,
+                "INVALID_FIELD",
+                "demandRemaining must be a non-negative integer.",
+            )
+    if "isOpen" in request and not isinstance(request["isOpen"], bool):
+        raise ApiError(400, "INVALID_FIELD", "isOpen must be a boolean.")
+    if "resources" in request:
+        resources = request["resources"]
+        if not isinstance(resources, list):
+            raise ApiError(400, "INVALID_FIELD", "resources must be a list.")
+        try:
+            parsed_resources = [Resource(resource) for resource in resources]
+        except (TypeError, ValueError):
+            raise ApiError(
+                400,
+                "INVALID_FIELD",
+                "resources must contain supported resource values.",
+            )
+
+    with store.lock:
+        shelter = store.shelters.get(shelter_id)
+        if shelter is None:
+            raise ApiError(404, "SHELTER_NOT_FOUND", "The shelter does not exist.")
+
+        previous_resources = {
+            Resource(resource) for resource in shelter.resources
+        }
+        if "demandRemaining" in request:
+            shelter.demand_remaining = request["demandRemaining"]
+        if "isOpen" in request:
+            shelter.is_open = request["isOpen"]
+        if parsed_resources is not None:
+            shelter.resources = parsed_resources
+        removed_resources = previous_resources - {
+            Resource(resource) for resource in shelter.resources
+        }
+        log_event(
+            EventType.SHELTER_UPDATED,
+            EventSeverity.INFO,
+            f"Shelter {shelter_id} updated.",
+            {"shelterId": shelter_id},
+        )
+        rerouted, at_risk = reroute_shelter_shipments(
+            shelter_id, removed_resources
+        )
+        shelter_response = {
+            "id": shelter.id,
+            "demandRemaining": shelter.demand_remaining,
+            "isOpen": shelter.is_open,
+            "resources": [Resource(resource).value for resource in shelter.resources],
+        }
+        return {
+            "shelter": shelter_response,
+            "rerouted": rerouted,
+            "atRisk": at_risk,
+        }
 
 
 @router.post("/sim/clock")

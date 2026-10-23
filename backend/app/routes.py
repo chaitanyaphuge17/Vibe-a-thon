@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app import clock, store
 from app.events import log_event
+from app.matcher import split_batch
 from app.models import (
     Batch,
     BatchStatus,
@@ -14,6 +15,7 @@ from app.models import (
     Location,
     Resource,
 )
+from app.rules import REQUIRED_RESOURCES
 
 
 router = APIRouter(prefix="/api")
@@ -91,10 +93,8 @@ def get_state() -> dict:
 @router.get("/rules")
 def get_rules() -> dict[str, list[str]]:
     return {
-        "cooked_meal": [],
-        "short_life_medicine": [],
-        "raw_ration_kit": ["cooking_fuel"],
-        "infant_formula": ["clean_water"],
+        item_type.value: [resource.value for resource in resources]
+        for item_type, resources in REQUIRED_RESOURCES.items()
     }
 
 
@@ -144,52 +144,24 @@ def create_batch(request: CreateBatchRequest) -> dict:
 
 @router.post("/batches/{batch_id}/dispatch")
 def dispatch_batch(batch_id: str, request: EmptyRequest) -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "batch": {
-            "id": batch_id,
-            "remainingQty": 20,
-            "status": "PARTIALLY_ASSIGNED",
-        },
-        "createdShipments": [
-            {
-                "id": "ship_1",
-                "batchId": batch_id,
-                "riderId": "rider_1",
-                "shelterId": "shelter_a",
-                "originalShelterId": None,
-                "qty": 40,
-                "status": "CREATED",
-                "etaPickupAt": _timestamp(8),
-                "etaDeliveryAt": _timestamp(25),
-                "leaseExpiresAt": None,
-                "createdAt": _timestamp(),
+    with store.lock:
+        batch = store.batches.get(batch_id)
+        if batch is None:
+            raise ApiError(404, "BATCH_NOT_FOUND", "The batch does not exist.")
+        if batch.status == BatchStatus.SPOILED:
+            raise ApiError(409, "BATCH_ALREADY_SPOILED", "The batch has spoiled.")
+
+        created_shipments, rejections = split_batch(batch)
+        return {
+            "batch": {
+                "id": batch.id,
+                "remainingQty": batch.remaining_qty,
+                "status": _json(batch)["status"],
+                "statusReason": batch.status_reason,
             },
-            {
-                "id": "ship_2",
-                "batchId": batch_id,
-                "riderId": "rider_2",
-                "shelterId": "shelter_a",
-                "originalShelterId": None,
-                "qty": 40,
-                "status": "CREATED",
-                "etaPickupAt": _timestamp(8),
-                "etaDeliveryAt": _timestamp(25),
-                "leaseExpiresAt": None,
-                "createdAt": _timestamp(),
-            },
-        ],
-        "rejections": [
-            {
-                "shelterId": "shelter_b",
-                "reason": "Missing required resource: clean_water",
-            },
-            {
-                "riderId": "rider_3",
-                "reason": "Cannot reach donor and shelter before expiry.",
-            },
-        ],
-    }
+            "createdShipments": [_json(shipment) for shipment in created_shipments],
+            "rejections": rejections,
+        }
 
 
 @router.post("/shipments/{shipment_id}/claim")

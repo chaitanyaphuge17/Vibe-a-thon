@@ -1,0 +1,16 @@
+# Dependencies
+frontend/node_modules/
+
+# Production build
+frontend/dist/
+
+# TypeScript build cache
+frontend/tsconfig.tsbuildinfo
+
+# Environment variables
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# Logs
+npm-debug.log*

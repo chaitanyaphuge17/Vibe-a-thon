@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app import clock, store
 from app.events import log_event
+from app.leases import extend_shipment_lease, lease_expiry
 from app.matcher import split_batch
 from app.models import (
     Batch,
@@ -16,6 +17,7 @@ from app.models import (
     Resource,
 )
 from app.rules import REQUIRED_RESOURCES
+from app.tick import run_tick
 
 
 router = APIRouter(prefix="/api")
@@ -75,6 +77,7 @@ def health() -> dict[str, bool]:
 
 @router.get("/state")
 def get_state() -> dict:
+    run_tick()
     with store.lock:
         return {
             "clock": {
@@ -166,51 +169,209 @@ def dispatch_batch(batch_id: str, request: EmptyRequest) -> dict:
 
 @router.post("/shipments/{shipment_id}/claim")
 def claim_shipment(shipment_id: str, request: ClaimShipmentRequest) -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "shipment": {
-            "id": shipment_id,
-            "status": "CLAIMED",
-            "riderId": request.rider_id,
-            "leaseExpiresAt": _timestamp(5),
-        },
-        "leaseTtlSeconds": 300,
-    }
+    with store.lock:
+        shipment = store.shipments.get(shipment_id)
+        if shipment is None:
+            raise ApiError(
+                404, "SHIPMENT_NOT_FOUND", "The shipment does not exist."
+            )
+        if (
+            shipment.status != "CREATED"
+            or shipment.rider_id != request.rider_id
+        ):
+            raise ApiError(
+                409,
+                "NOT_CLAIMABLE",
+                "The shipment is not available for this rider to claim.",
+            )
+        batch = store.batches.get(shipment.batch_id)
+        if batch is None:
+            raise ApiError(409, "NOT_CLAIMABLE", "The shipment batch is unavailable.")
+
+        now = clock.now()
+        lease_expires_at, ttl_seconds = lease_expiry(batch, now)
+        shipment.status = "CLAIMED"
+        shipment.lease_expires_at = lease_expires_at
+        log_event(
+            EventType.SHIPMENT_CLAIMED,
+            EventSeverity.INFO,
+            f"Rider {request.rider_id} claimed shipment {shipment_id}.",
+            {
+                "batchId": shipment.batch_id,
+                "shipmentId": shipment.id,
+                "riderId": request.rider_id,
+            },
+        )
+        return {
+            "shipment": {
+                "id": shipment.id,
+                "status": shipment.status,
+                "riderId": shipment.rider_id,
+                "leaseExpiresAt": _json(shipment)["leaseExpiresAt"],
+            },
+            "leaseTtlSeconds": ttl_seconds,
+        }
 
 
 @router.post("/riders/{rider_id}/heartbeat")
 def rider_heartbeat(rider_id: str, location: Location) -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "rider": {
-            "id": rider_id,
-            "status": "BUSY",
-            "lastHeartbeatAt": _timestamp(),
-        },
-        "extendedShipmentIds": ["ship_1"],
-    }
+    with store.lock:
+        rider = store.riders.get(rider_id)
+        if rider is None:
+            raise ApiError(404, "RIDER_NOT_FOUND", "The rider does not exist.")
+
+        if rider_id in store.simulated_unresponsive:
+            return {
+                "rider": {
+                    "id": rider.id,
+                    "status": rider.status,
+                    "lastHeartbeatAt": _json(rider)["lastHeartbeatAt"],
+                },
+                "extendedShipmentIds": [],
+                "ignored": True,
+            }
+
+        now = clock.now()
+        rider.location = location
+        rider.last_heartbeat_at = now
+        extended_shipment_ids: list[str] = []
+        for shipment_id in rider.active_shipment_ids:
+            shipment = store.shipments.get(shipment_id)
+            if shipment is None or shipment.status not in (
+                "CLAIMED",
+                "IN_TRANSIT",
+            ):
+                continue
+            batch = store.batches.get(shipment.batch_id)
+            if batch is None:
+                continue
+            extend_shipment_lease(shipment, batch, now)
+            extended_shipment_ids.append(shipment.id)
+
+        return {
+            "rider": {
+                "id": rider.id,
+                "status": rider.status,
+                "lastHeartbeatAt": _json(rider)["lastHeartbeatAt"],
+            },
+            "extendedShipmentIds": extended_shipment_ids,
+        }
 
 
 @router.post("/shipments/{shipment_id}/pickup")
 def pickup_shipment(shipment_id: str, request: EmptyRequest) -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "shipment": {
-            "id": shipment_id,
-            "status": "IN_TRANSIT",
-            "leaseExpiresAt": _timestamp(5),
+    with store.lock:
+        shipment = store.shipments.get(shipment_id)
+        if shipment is None:
+            raise ApiError(
+                404, "SHIPMENT_NOT_FOUND", "The shipment does not exist."
+            )
+        if shipment.status != "CLAIMED":
+            raise ApiError(
+                409,
+                "INVALID_TRANSITION",
+                "Only a claimed shipment can be picked up.",
+            )
+        shipment.status = "IN_TRANSIT"
+        log_event(
+            EventType.PICKED_UP,
+            EventSeverity.INFO,
+            f"Shipment {shipment_id} picked up and is in transit.",
+            {
+                "batchId": shipment.batch_id,
+                "shipmentId": shipment.id,
+                "riderId": shipment.rider_id,
+            },
+        )
+        return {
+            "shipment": {
+                "id": shipment.id,
+                "status": shipment.status,
+                "leaseExpiresAt": _json(shipment)["leaseExpiresAt"],
+            }
         }
-    }
 
 
 @router.post("/shipments/{shipment_id}/deliver")
 def deliver_shipment(shipment_id: str, request: EmptyRequest) -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "shipment": {"id": shipment_id, "status": "DELIVERED"},
-        "shelter": {"id": "shelter_a", "demandRemaining": 10},
-        "batch": {"id": "batch_1", "status": "PARTIALLY_ASSIGNED"},
-    }
+    with store.lock:
+        shipment = store.shipments.get(shipment_id)
+        if shipment is None:
+            raise ApiError(
+                404, "SHIPMENT_NOT_FOUND", "The shipment does not exist."
+            )
+        if shipment.status == "SPOILED":
+            raise ApiError(
+                409, "SHIPMENT_SPOILED", "The shipment has spoiled."
+            )
+        if shipment.status != "IN_TRANSIT":
+            raise ApiError(
+                409,
+                "INVALID_TRANSITION",
+                "Only an in-transit shipment can be delivered.",
+            )
+        shelter = store.shelters.get(shipment.shelter_id)
+        batch = store.batches.get(shipment.batch_id)
+        if shelter is None or batch is None:
+            raise ApiError(
+                409, "INVALID_TRANSITION", "The shipment's destination is unavailable."
+            )
+
+        shipment.status = "DELIVERED"
+        shipment.lease_expires_at = None
+        shelter.demand_remaining = max(0, shelter.demand_remaining - shipment.qty)
+        shelter.reserved_qty = max(0, shelter.reserved_qty - shipment.qty)
+        rider = store.riders.get(shipment.rider_id)
+        if rider is not None:
+            if shipment_id in rider.active_shipment_ids:
+                rider.active_shipment_ids.remove(shipment_id)
+            if (
+                not rider.active_shipment_ids
+                and rider.id not in store.simulated_unresponsive
+            ):
+                rider.status = "AVAILABLE"
+
+        batch_shipments = [
+            item
+            for item in store.shipments.values()
+            if item.batch_id == batch.id
+        ]
+        if batch.remaining_qty > 0:
+            batch.status = (
+                BatchStatus.PARTIALLY_ASSIGNED
+                if batch_shipments
+                else BatchStatus.OPEN
+            )
+        elif all(
+            item.status in ("DELIVERED", "EXPIRED_LEASE")
+            for item in batch_shipments
+        ):
+            batch.status = BatchStatus.COMPLETED
+        else:
+            batch.status = BatchStatus.FULLY_ASSIGNED
+
+        log_event(
+            EventType.DELIVERED,
+            EventSeverity.SUCCESS,
+            f"Shipment {shipment_id} delivered to {shelter.id}.",
+            {
+                "batchId": batch.id,
+                "shipmentId": shipment.id,
+                "riderId": shipment.rider_id,
+                "shelterId": shelter.id,
+            },
+        )
+        return {
+            "shipment": {"id": shipment.id, "status": shipment.status},
+            "shelter": {
+                "id": shelter.id,
+                "demandRemaining": shelter.demand_remaining,
+            },
+            "batch": {
+                "id": batch.id,
+                "status": _json(batch)["status"],
+            },
+        }
 
 
 @router.post("/shelters/{shelter_id}")
@@ -241,27 +402,53 @@ def update_shelter(shelter_id: str, request: ShelterUpdateRequest) -> dict:
 
 @router.post("/sim/clock")
 def advance_clock(request: AdvanceClockRequest) -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "clock": {
-            "now": _timestamp(request.advance_minutes),
-            "offsetMinutes": clock.offset_minutes() + request.advance_minutes,
-        },
-        "tickSummary": {"leasesExpired": 1, "reassigned": 1, "spoiled": 0},
-    }
+    with store.lock:
+        clock.advance(request.advance_minutes)
+        tick_summary = run_tick()
+        log_event(
+            EventType.CLOCK_ADVANCED,
+            EventSeverity.INFO,
+            f"Simulation clock advanced by {request.advance_minutes} minutes.",
+        )
+        return {
+            "clock": {
+                "now": _timestamp(),
+                "offsetMinutes": clock.offset_minutes(),
+            },
+            "tickSummary": tick_summary,
+        }
 
 
 @router.post("/sim/rider/{rider_id}/unresponsive")
 def set_rider_unresponsive(
     rider_id: str, request: RiderUnresponsiveRequest
 ) -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "rider": {
-            "id": rider_id,
-            "status": "UNRESPONSIVE" if request.unresponsive else "AVAILABLE",
-        }
-    }
+    with store.lock:
+        rider = store.riders.get(rider_id)
+        if rider is None:
+            raise ApiError(404, "RIDER_NOT_FOUND", "The rider does not exist.")
+        if request.unresponsive:
+            store.simulated_unresponsive.add(rider_id)
+            rider.status = "UNRESPONSIVE"
+            log_event(
+                EventType.RIDER_UNRESPONSIVE,
+                EventSeverity.WARNING,
+                f"Rider {rider_id} marked unresponsive.",
+                {"riderId": rider_id},
+            )
+        else:
+            store.simulated_unresponsive.discard(rider_id)
+            if rider.active_shipment_ids:
+                rider.status = "BUSY"
+            else:
+                rider.status = "AVAILABLE"
+            log_event(
+                EventType.RIDER_UNRESPONSIVE,
+                EventSeverity.INFO,
+                f"Rider {rider_id} restored to responsive status.",
+                {"riderId": rider_id},
+            )
+        return {"rider": {"id": rider.id, "status": rider.status}}
 
 
 @router.post("/sim/scenario/handout", status_code=201)

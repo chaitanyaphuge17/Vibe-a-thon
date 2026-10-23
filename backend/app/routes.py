@@ -516,39 +516,63 @@ def set_rider_unresponsive(
 
 @router.post("/sim/scenario/handout", status_code=201)
 def handout_scenario() -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "batch": {
-            "id": "batch_2",
-            "totalQty": 180,
-            "expiresAt": _timestamp(75),
-        }
-    }
+    with store.lock:
+        batch = _create_batch("donor_1", ItemType.COOKED_MEAL, 180, 75)
+        return {"batch": _json(batch)}
 
 
 @router.post("/sim/scenario/tight-expiry", status_code=201)
 def tight_expiry_scenario() -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "batch": {
-            "id": "batch_3",
-            "totalQty": 60,
-            "expiresAt": _timestamp(2),
-        }
-    }
+    with store.lock:
+        donor = store.donors["donor_1"]
+        possible_times = [
+            travel_minutes(rider.location, donor.location)
+            + travel_minutes(donor.location, shelter.location)
+            for rider in store.riders.values()
+            if rider.status == "AVAILABLE"
+            for shelter in store.shelters.values()
+            if shelter.is_open
+            and shelter.demand_remaining - shelter.reserved_qty > 0
+            and is_compatible(ItemType.COOKED_MEAL, shelter)[0]
+        ]
+        best_travel = min(possible_times, default=0.0)
+        expires_in_minutes = max(
+            1, ceil(best_travel + SAFETY_BUFFER) - 1
+        )
+        batch = _create_batch(
+            "donor_1",
+            ItemType.COOKED_MEAL,
+            60,
+            expires_in_minutes,
+        )
+        if expires_in_minutes >= best_travel + SAFETY_BUFFER:
+            raise RuntimeError("Tight-expiry scenario did not meet its expiry constraint.")
+        return {"batch": _json(batch)}
 
 
 @router.post("/sim/scenario/incompatible", status_code=201)
 def incompatible_scenario() -> dict:
-    # STUB: replaced in phase Bx
-    return {
-        "batch": {
-            "id": "batch_4",
-            "itemType": "infant_formula",
-            "totalQty": 30,
-            "status": "OPEN",
-        }
-    }
+    with store.lock:
+        for shelter in store.shelters.values():
+            if Resource.CLEAN_WATER in shelter.resources:
+                shelter.resources = [
+                    resource
+                    for resource in shelter.resources
+                    if resource != Resource.CLEAN_WATER
+                ]
+                log_event(
+                    EventType.SHELTER_UPDATED,
+                    EventSeverity.INFO,
+                    f"Shelter {shelter.id} prepared without clean_water for the incompatible scenario.",
+                    {"shelterId": shelter.id},
+                )
+        batch = _create_batch(
+            "donor_1",
+            ItemType.INFANT_FORMULA,
+            30,
+            75,
+        )
+        return {"batch": _json(batch)}
 
 
 @router.post("/sim/reset")

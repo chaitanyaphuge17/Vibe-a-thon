@@ -12,6 +12,7 @@ riders: dict[str, Rider] = {}
 shelters: dict[str, Shelter] = {}
 batches: dict[str, Batch] = {}
 shipments: dict[str, Shipment] = {}
+simulated_unresponsive: set[str] = set()
 next_batch_id = 1
 next_shipment_id = 1
 
@@ -25,6 +26,7 @@ def reset() -> None:
         donors, riders, shelters = seed_entities()
         batches = {}
         shipments = {}
+        simulated_unresponsive.clear()
         next_batch_id = 1
         next_shipment_id = 1
 

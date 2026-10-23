@@ -1,0 +1,40 @@
+{
+  "clock": { "now": "2026-10-23T18:00:00Z", "offsetMinutes": 0 },
+  "donors": [
+    { "id": "donor_1", "name": "Grand Banquet Hall", "location": { "lat": 18.5204, "lng": 73.8567 } },
+    { "id": "donor_2", "name": "Campus Hostel Mess", "location": { "lat": 18.528, "lng": 73.84 } },
+    { "id": "donor_3", "name": "City Pharmacy", "location": { "lat": 18.515, "lng": 73.87 } }
+  ],
+  "riders": [
+    { "id": "rider_1", "name": "Aarav", "location": { "lat": 18.53, "lng": 73.85 }, "capacity": 40, "status": "AVAILABLE", "lastHeartbeatAt": "2026-10-23T18:00:00Z", "activeShipmentIds": [] },
+    { "id": "rider_2", "name": "Meera", "location": { "lat": 18.535, "lng": 73.86 }, "capacity": 40, "status": "UNRESPONSIVE", "lastHeartbeatAt": "2026-10-23T17:51:00Z", "activeShipmentIds": ["ship_3"] },
+    { "id": "rider_3", "name": "Kabir", "location": { "lat": 18.51, "lng": 73.84 }, "capacity": 60, "status": "BUSY", "lastHeartbeatAt": "2026-10-23T17:59:00Z", "activeShipmentIds": ["ship_2"] },
+    { "id": "rider_4", "name": "Isha", "location": { "lat": 18.545, "lng": 73.855 }, "capacity": 40, "status": "AVAILABLE", "lastHeartbeatAt": "2026-10-23T18:00:00Z", "activeShipmentIds": [] },
+    { "id": "rider_5", "name": "Rohan", "location": { "lat": 18.52, "lng": 73.88 }, "capacity": 60, "status": "AVAILABLE", "lastHeartbeatAt": "2026-10-23T18:00:00Z", "activeShipmentIds": [] }
+  ],
+  "shelters": [
+    { "id": "shelter_a", "name": "Shelter A", "location": { "lat": 18.54, "lng": 73.87 }, "demandRemaining": 50, "reservedQty": 40, "isOpen": true, "resources": ["clean_water", "cooking_fuel"] },
+    { "id": "shelter_b", "name": "Shelter B", "location": { "lat": 18.56, "lng": 73.84 }, "demandRemaining": 80, "reservedQty": 0, "isOpen": true, "resources": ["cooking_fuel"] },
+    { "id": "shelter_c", "name": "Shelter C", "location": { "lat": 18.51, "lng": 73.89 }, "demandRemaining": 60, "reservedQty": 40, "isOpen": true, "resources": ["clean_water", "cooking_fuel"] }
+  ],
+  "batches": [
+    { "id": "batch_1", "donorId": "donor_1", "itemType": "cooked_meal", "totalQty": 180, "remainingQty": 20, "createdAt": "2026-10-23T18:00:00Z", "expiresAt": "2026-10-23T19:15:00Z", "status": "PARTIALLY_ASSIGNED", "statusReason": null }
+  ],
+  "shipments": [
+    { "id": "ship_1", "batchId": "batch_1", "riderId": "rider_1", "shelterId": "shelter_a", "originalShelterId": null, "qty": 40, "status": "IN_TRANSIT", "etaPickupAt": "2026-10-23T18:08:00Z", "etaDeliveryAt": "2026-10-23T18:25:00Z", "leaseExpiresAt": "2026-10-23T18:05:00Z", "createdAt": "2026-10-23T18:00:00Z" },
+    { "id": "ship_2", "batchId": "batch_1", "riderId": "rider_3", "shelterId": "shelter_c", "originalShelterId": null, "qty": 40, "status": "CLAIMED", "etaPickupAt": "2026-10-23T18:08:00Z", "etaDeliveryAt": "2026-10-23T18:28:00Z", "leaseExpiresAt": "2026-10-23T18:05:00Z", "createdAt": "2026-10-23T18:00:00Z" },
+    { "id": "ship_3", "batchId": "batch_1", "riderId": "rider_4", "shelterId": "shelter_c", "originalShelterId": "shelter_a", "qty": 40, "status": "REROUTED", "etaPickupAt": "2026-10-23T18:08:00Z", "etaDeliveryAt": "2026-10-23T18:30:00Z", "leaseExpiresAt": null, "createdAt": "2026-10-23T18:00:00Z" },
+    { "id": "ship_4", "batchId": "batch_1", "riderId": null, "shelterId": "shelter_b", "originalShelterId": null, "qty": 40, "status": "EXPIRED_LEASE", "etaPickupAt": "2026-10-23T18:08:00Z", "etaDeliveryAt": "2026-10-23T18:32:00Z", "leaseExpiresAt": "2026-10-23T17:59:00Z", "createdAt": "2026-10-23T18:00:00Z" }
+  ],
+  "events": [
+    { "id": "evt_1", "at": "2026-10-23T18:00:00Z", "type": "RESET", "severity": "info", "message": "Simulation reset to seed data", "refs": {} },
+    { "id": "evt_2", "at": "2026-10-23T18:00:00Z", "type": "BATCH_CREATED", "severity": "success", "message": "Batch batch_1 created with 180 cooked meals", "refs": { "batchId": "batch_1" } },
+    { "id": "evt_3", "at": "2026-10-23T18:00:00Z", "type": "SHIPMENT_CREATED", "severity": "success", "message": "Shipment ship_1 allocated to Shelter A", "refs": { "batchId": "batch_1", "shipmentId": "ship_1" } },
+    { "id": "evt_4", "at": "2026-10-23T17:59:00Z", "type": "LEASE_EXPIRED", "severity": "warning", "message": "Rider rider_2 lease expired on ship_4", "refs": { "batchId": "batch_1", "shipmentId": "ship_4", "riderId": "rider_2" } },
+    { "id": "evt_5", "at": "2026-10-23T17:59:00Z", "type": "REROUTED", "severity": "warning", "message": "Shipment ship_3 rerouted from Shelter A to Shelter C", "refs": { "shipmentId": "ship_3", "shelterId": "shelter_c" } },
+    { "id": "evt_6", "at": "2026-10-23T18:00:00Z", "type": "AT_RISK", "severity": "warning", "message": "Remaining batch quantity has limited delivery window", "refs": { "batchId": "batch_1" } },
+    { "id": "evt_7", "at": "2026-10-23T18:00:00Z", "type": "SPOILED", "severity": "error", "message": "A shipment was marked spoiled after expiry", "refs": { "shipmentId": "ship_4" } },
+    { "id": "evt_8", "at": "2026-10-23T17:51:00Z", "type": "RIDER_UNRESPONSIVE", "severity": "error", "message": "Rider rider_2 is unresponsive", "refs": { "riderId": "rider_2" } },
+    { "id": "evt_9", "at": "2026-10-23T18:00:00Z", "type": "CLOCK_ADVANCED", "severity": "info", "message": "Simulation clock initialized", "refs": {} }
+  ]
+}
